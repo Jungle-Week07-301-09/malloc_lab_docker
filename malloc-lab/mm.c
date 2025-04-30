@@ -52,6 +52,9 @@ team_t team = {
 #define DSIZE 8 // 더블워드 사이즈(bytes)
 #define CHUNKSIZE (1<<12) // heap을 이정도 늘린다(bytes)
 
+#define MAX_LEVEL 21
+#define MIN_LEVEL 4
+
 #define MAX(x, y) ((x) > (y)? (x):(y))
 // pack a size and allocated bit into a word 
 #define PACK(size, alloc) ((size) | (alloc))
@@ -94,7 +97,7 @@ static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
 static void* find_buddy(void* bp);
 static void _merge_buddy(void* bp, void* buddy);
-static void merge_buddy(void*bp);
+static void* merge_buddy(void*bp);
 static void removeBlock(void *bp);
 static void putFreeBlock(void *bp);
 
@@ -167,22 +170,28 @@ int mm_init(void)
 // }
 
 static void* coalesce(void* bp){
-
+    return merge_buddy(bp);
 }
 
-static void merge_buddy(void* bp){
+static void* merge_buddy(void* bp){
     void* buddy = find_buddy(bp);
     size_t size = GET_SIZE(HDRP(bp));
-    size_t buddy_size = GET_SIZE(HDRP(bp));
 
-    if(!GET_ALLOC(HDRP(buddy)) && (size == buddy_size)){
+    if(size == MAX_LEVEL){
+        putFreeBlock(bp);
+        return bp;
+    }
+
+    if(!GET_ALLOC(HDRP(buddy)) && (size ==  GET_SIZE(HDRP(buddy)))){
         void* front = (bp < buddy) ? bp : buddy;
         void* second  = (bp > buddy) ? bp : buddy;
         _merge_buddy(front, second);
-        merge_buddy(front);
+        return merge_buddy(front);
     }else{
         putFreeBlock(bp);
+        return bp;
     }
+    
 }
 
 static void _merge_buddy(void* bp, void* buddy){
@@ -192,7 +201,6 @@ static void _merge_buddy(void* bp, void* buddy){
     removeBlock(buddy);
     PUT(HDRP(bp),PACK(size, 0));
     PUT(FTRP(buddy), PACK(size, 0));
-    putFreeBlock(bp);
 }
 
 
