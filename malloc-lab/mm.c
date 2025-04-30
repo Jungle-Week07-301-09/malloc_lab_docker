@@ -1,6 +1,6 @@
 /*
  * mm-naive.c - The fastest, least memory-efficient malloc package.
- *
+
  * In this naive approach, a block is allocated by simply incrementing
  * the brk pointer.  A block is pure payload. There are no headers or
  * footers.  Blocks are never coalesced or reused. Realloc is
@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <unistd.h>
+#include <stdint.h>
 #include <string.h>
 // @@@@@ explicit @@@@@
 #include <sys/mman.h>
@@ -66,48 +67,62 @@ team_t team = {
 #define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE) // 헤더+데이터+풋터 -(헤더+풋터)
 
+#define LOG(k) ((unsigned int)(log2f((float)k)))
+#define INDEX(base, k) ((base+(WSIZE*(k-1))))
+
 // Given block ptr bp, compute address of next and previous blocks
 // 현재 bp에서 WSIZE를 빼서 header를 가리키게 하고, header에서 get size를 한다.
 // 그럼 현재 블록 크기를 return하고(헤더+데이터+풋터), 그걸 현재 bp에 더하면 next_bp나옴
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
+#define PREV(bp) (*(void**)(bp))
+#define NEXT(bp) (*(void**)(bp + WSIZE))
 
-#define PREV(bp) (*(void **)(bp))
-#define NEXT(bp) (*(void **)(bp + WSIZE))
+#define LOG(k) ((unsigned int)log2f((float)k))
+#define INDEX(base, k) (base + (WSIZE*(k-1)))
 
 static void *heap_listp = NULL; // heap 시작주소 pointer
-static void *free_listp = NULL; // free list head - 가용리스트 시작부분
+static void *base_listp = NULL; // base list head - 가용리스트 시작부분
 // static void *last_bp = NULL; // next_fit을 위한 전역변수
 
 static void *coalesce(void *bp);
 static void *extend_heap(size_t words);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
-
-void removeBlock(void *bp);
-void putFreeBlock(void *bp);
+static void* find_buddy(void* bp);
+static void _merge_buddy(void* bp, void* buddy);
+static void merge_buddy(void*bp);
+static void removeBlock(void *bp);
+static void putFreeBlock(void *bp);
 
 int mm_init(void)
-{
-    heap_listp = mem_sbrk(3 * DSIZE);
-    if (heap_listp == (void *)-1)
-    {
+{   
+    heap_listp = mem_sbrk(8*DSIZE);
+    if (heap_listp == (void*)-1){
         return -1;
     }
-    PUT(heap_listp, 0); // Unused padding
-    PUT(heap_listp + WSIZE, PACK(2 * DSIZE, 1));
-    PUT(heap_listp + 2 * WSIZE, NULL);
-    PUT(heap_listp + 3 * WSIZE, NULL);
-    PUT(heap_listp + 4 * WSIZE, PACK(2 * DSIZE, 1));
-    PUT(heap_listp + 5 * WSIZE, PACK(0, 1));
+    PUT(heap_listp, 0); //Unused padding 여기서 패딩은 12byte
+    PUT(heap_listp + 3*WSIZE, PACK(2*DSIZE,1)); // 프롤로그 헤더 | 시작 주소 12
+    PUT(heap_listp + 4*WSIZE,NULL);  // 프롤로그 payload | 시작 주소 16
+    PUT(heap_listp + 5*WSIZE,NULL);  // 프롤로그 payload | 시작 주소 20
+    PUT(heap_listp + 6*WSIZE,PACK(2*DSIZE,1)); // 프롤로그 푸터 | 시작 주소 24
+    PUT(heap_listp + 15*WSIZE,PACK(0,1)); // 에필로그 헤더 | 시작 주소 60
 
-    free_listp = heap_listp + DSIZE;
+    base_listp = heap_listp + 7*WSIZE; // base_listp의 시작주소는 28 ~ 56 까지 | 총 8개의 포인터 | 32 byte
+
+    /* base_listp 에서 8개의 슬롯(4B씩)*/
+    for (int i = 0; i < 8; i++) {
+    PUT(base_listp + i*WSIZE,
+        (unsigned int)(heap_listp + 4*WSIZE));
+    }
+     
     // last_bp = free_listp; // next_fit 을 위한 추가
     // Extend the empty heap with a free block of CHUNKSIZE bytes
-    if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
+    if (extend_heap(CHUNKSIZE/WSIZE) == NULL) 
         return -1;
     return 0;
 }
+
 // split_buddy (계속 나눔), find_buddy, merge_buddy
 static void split_buddy(void *bp, size_t asize)
 {
@@ -132,45 +147,35 @@ static void split_buddy(void *bp, size_t asize)
     }
 }
 
-// 연결
-static void *coalesce(void *bp)
-{
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp)); // 현재 블록 사이즈
+static void* coalesce(void* bp){
 
-    // case 1
-    // case 2
-    if (prev_alloc && !next_alloc)
-    {
-        removeBlock(NEXT_BLKP(bp));
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size, 0));
-    }
-    // case 3
-    else if (!prev_alloc && next_alloc)
-    {
-        removeBlock(PREV_BLKP(bp));
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        bp = PREV_BLKP(bp);
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size, 0));
-    }
-    // case 4
-    else if (!prev_alloc && !next_alloc)
-    {
-        removeBlock(PREV_BLKP(bp));
-        removeBlock(NEXT_BLKP(bp));
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) +
-                GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
-    }
-    putFreeBlock(bp);
-    return bp;
 }
+
+static void merge_buddy(void* bp){
+    void* buddy = find_buddy(bp);
+    size_t size = GET_SIZE(HDRP(bp));
+    size_t buddy_size = GET_SIZE(HDRP(bp));
+
+    if(!GET_ALLOC(HDRP(buddy)) && (size == buddy_size)){
+        void* front = (bp < buddy) ? bp : buddy;
+        void* second  = (bp > buddy) ? bp : buddy;
+        _merge_buddy(front, second);
+        merge_buddy(front);
+    }else{
+        putFreeBlock(bp);
+    }
+}
+
+static void _merge_buddy(void* bp, void* buddy){
+    size_t bp_size = GET_SIZE(HDRP(bp));
+    size_t size = bp_size * 2;
+    removeBlock(bp);
+    removeBlock(buddy);
+    PUT(HDRP(bp),PACK(size, 0));
+    PUT(FTRP(buddy), PACK(size, 0));
+    putFreeBlock(bp);
+}
+
 
 static void *extend_heap(size_t words)
 {
@@ -326,9 +331,9 @@ void removeBlock(void *bp)
 void mm_free(void *bp)
 {
     size_t size = GET_SIZE(HDRP(bp));
-    PUT(HDRP(bp), PACK(size, 0));
-    PUT(FTRP(bp), PACK(size, 0));
-    coalesce(bp);
+    PUT(HDRP(bp), PACK(size,0));
+    PUT(FTRP(bp), PACK(size,0));
+    coalesce(bp);    
 }
 
 /*
@@ -359,4 +364,9 @@ void *mm_realloc(void *bp, size_t size)
     memcpy(newp, bp, oldsize);
     mm_free(bp);
     return newp;
+}
+
+static void* find_buddy(void* bp){
+    size_t size = GET_SIZE(HDRP(bp));
+    return (void*)((uintptr_t)bp ^ size);
 }
