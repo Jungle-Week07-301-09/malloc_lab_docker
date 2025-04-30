@@ -17,7 +17,6 @@
 // @@@@@ explicit @@@@@
 #include <sys/mman.h>
 #include <errno.h>
-#include <math.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -75,9 +74,6 @@ team_t team = {
 
 #define PREV(bp) (*(void **)(bp))
 #define NEXT(bp) (*(void **)(bp + WSIZE))
-
-#define LOG(k) ((unsigned int)log2f((float)k))
-#define INDEX(base, k) (base + (WSIZE * (k - 1)))
 
 static void *heap_listp = NULL; // heap 시작주소 pointer
 static void *free_listp = NULL; // free list head - 가용리스트 시작부분
